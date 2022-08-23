@@ -43,7 +43,7 @@ type CopyResponseHandler struct {
 // CaddyModule returns the Caddy module information.
 func (CopyResponseHandler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "http.handlers.copy_response",
+		ID:  "http.handlers.custom_copy_response",
 		New: func() caddy.Module { return new(CopyResponseHandler) },
 	}
 }
@@ -104,7 +104,7 @@ type CopyResponseHeadersHandler struct {
 // CaddyModule returns the Caddy module information.
 func (CopyResponseHeadersHandler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "http.handlers.copy_response_headers",
+		ID:  "http.handlers.custom_copy_response_headers",
 		New: func() caddy.Module { return new(CopyResponseHeadersHandler) },
 	}
 }

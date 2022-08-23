@@ -33,8 +33,8 @@ import (
 
 func init() {
 	httpcaddyfile.RegisterHandlerDirective("custom_reverse_proxy", parseCaddyfile)
-	httpcaddyfile.RegisterHandlerDirective("copy_response", parseCopyResponseCaddyfile)
-	httpcaddyfile.RegisterHandlerDirective("copy_response_headers", parseCopyResponseHeadersCaddyfile)
+	httpcaddyfile.RegisterHandlerDirective("custom_copy_response", parseCopyResponseCaddyfile)
+	httpcaddyfile.RegisterHandlerDirective("custom_copy_response_headers", parseCopyResponseHeadersCaddyfile)
 }
 
 func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
