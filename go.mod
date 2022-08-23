@@ -1,6 +1,6 @@
 module github.com/c1pca/customreverseproxy
 
-go 1.19
+go 1.18
 
 require (
 	github.com/caddyserver/caddy/v2 v2.5.2
