@@ -25,7 +25,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/fileserver"
-	"github.com/c1pca/caddy/v2/modules/caddyhttp/customreverseproxy"
+	"github.com/c1pca/customreverseproxy"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/rewrite"
 )
 
@@ -374,7 +374,7 @@ func parsePHPFastCGI(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error
 	}
 
 	// create the reverse proxy handler which uses our FastCGI transport
-	rpHandler := &reverseproxy.Handler{
+	rpHandler := &customreverseproxy.Handler{
 		TransportRaw: caddyconfig.JSONModuleObject(fcgiTransport, "protocol", "fastcgi", nil),
 	}
 

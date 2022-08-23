@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/c1pca/caddy/v2/modules/caddyhttp/customreverseproxy"
+	"github.com/c1pca/customreverseproxy"
 	"github.com/caddyserver/caddy/v2/modules/caddytls"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -130,7 +130,7 @@ func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 	// extract dial information from request (should have been embedded by the reverse proxy)
 	network, address := "tcp", r.URL.Host
-	if dialInfo, ok := reverseproxy.GetDialInfo(ctx); ok {
+	if dialInfo, ok := customreverseproxy.GetDialInfo(ctx); ok {
 		network = dialInfo.Network
 		address = dialInfo.Address
 	}

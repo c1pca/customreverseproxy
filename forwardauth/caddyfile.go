@@ -24,7 +24,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/headers"
-	"github.com/c1pca/caddy/v2/modules/caddyhttp/customreverseproxy"
+	"github.com/c1pca/customreverseproxy"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/rewrite"
 )
 
@@ -81,7 +81,7 @@ func parseCaddyfile(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 	dispenser := h.NewFromNextSegment()
 
 	// create the reverse proxy handler
-	rpHandler := &reverseproxy.Handler{
+	rpHandler := &customreverseproxy.Handler{
 		// set up defaults for header_up; custom_reverse_proxy already deals with
 		// adding  the other three X-Forwarded-* headers, but for this flow,
 		// we want to also send along the incoming method and URI since this
