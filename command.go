@@ -32,7 +32,7 @@ import (
 
 func init() {
 	caddycmd.RegisterCommand(caddycmd.Command{
-		Name:  "reverse-proxy",
+		Name:  "custom-reverse-proxy",
 		Func:  cmdReverseProxy,
 		Usage: "[--from <addr>] [--to <addr>] [--change-host-header]",
 		Short: "A quick and production-ready reverse proxy",
