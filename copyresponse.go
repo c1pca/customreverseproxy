@@ -62,7 +62,7 @@ func (h CopyResponseHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request
 	// don't allow this to be used outside of handle_response routes
 	if !ok {
 		return caddyhttp.Error(http.StatusInternalServerError,
-			fmt.Errorf("cannot use 'copy_response' outside of custom_reverse_proxy's handle_response routes"))
+			fmt.Errorf("cannot use 'custom_copy_response' outside of custom_reverse_proxy's custom_handle_response routes"))
 	}
 
 	// allow a custom status code to be written; otherwise the
@@ -148,7 +148,7 @@ func (h CopyResponseHeadersHandler) ServeHTTP(rw http.ResponseWriter, req *http.
 	// don't allow this to be used outside of handle_response routes
 	if !ok {
 		return caddyhttp.Error(http.StatusInternalServerError,
-			fmt.Errorf("cannot use 'copy_response_headers' outside of custom_reverse_proxy's handle_response routes"))
+			fmt.Errorf("cannot use 'custom_copy_response_headers' outside of custom_reverse_proxy's handle_response routes"))
 	}
 
 	for field, values := range hrc.response.Header {

@@ -25,8 +25,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/c1pca/customreverseproxy"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/caddyserver/caddy/v2/modules/caddytls"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -94,8 +94,10 @@ func (t *Transport) Provision(ctx caddy.Context) error {
 		t.Root = "{http.vars.root}"
 	}
 
-	version, _ := caddy.Version()
-	t.serverSoftware = "Caddy/" + version
+	t.serverSoftware = "Caddy"
+	if mod := caddy.GoModule(); mod.Version != "" {
+		t.serverSoftware += "/" + mod.Version
+	}
 
 	// Set a relatively short default dial timeout.
 	// This is helpful to make load-balancer retries more speedy.

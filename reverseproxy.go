@@ -23,11 +23,9 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptrace"
 	"net/textproto"
 	"net/url"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,11 +40,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 )
 
-var supports1xx bool
-
 func init() {
-	supports1xx = !regexp.MustCompile(`^go1\.1(?:7|8)\.`).Match([]byte(runtime.Version()))
-
 	caddy.RegisterModule(Handler{})
 }
 
@@ -109,11 +103,6 @@ type Handler struct {
 	// response is recognized as a streaming response, or if its
 	// content length is -1; for such responses, writes are flushed
 	// to the client immediately.
-	//
-	// Normally, a request will be canceled if the client disconnects
-	// before the response is received from the backend. If explicitly
-	// set to -1, client disconnection will be ignored and the request
-	// will be completed to help facilitate low-latency streaming.
 	FlushInterval caddy.Duration `json:"flush_interval,omitempty"`
 
 	// A list of IP ranges (supports CIDR notation) from which
@@ -188,6 +177,10 @@ type Handler struct {
 	// Holds the handle_response Caddyfile tokens while adapting
 	handleResponseSegments []*caddyfile.Dispenser
 
+	// Stores upgraded requests (hijacked connections) for proper cleanup
+	connections   map[io.ReadWriteCloser]openConnection
+	connectionsMu *sync.Mutex
+
 	ctx    caddy.Context
 	logger *zap.Logger
 }
@@ -204,6 +197,8 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 func (h *Handler) Provision(ctx caddy.Context) error {
 	h.ctx = ctx
 	h.logger = ctx.Logger(h)
+	h.connections = make(map[io.ReadWriteCloser]openConnection)
+	h.connectionsMu = new(sync.Mutex)
 
 	// verify SRV compatibility - TODO: LookupSRV deprecated; will be removed
 	for i, v := range h.Upstreams {
@@ -400,16 +395,34 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-// Cleanup cleans up the resources made by h during provisioning.
+// Cleanup cleans up the resources made by h.
 func (h *Handler) Cleanup() error {
-	// TODO: Close keepalive connections on reload? https://github.com/caddyserver/caddy/pull/2507/files#diff-70219fd88fe3f36834f474ce6537ed26R762
+	// close hijacked connections (both to client and backend)
+	var err error
+	h.connectionsMu.Lock()
+	for _, oc := range h.connections {
+		if oc.gracefulClose != nil {
+			// this is potentially blocking while we have the lock on the connections
+			// map, but that should be OK since the server has in theory shut down
+			// and we are no longer using the connections map
+			gracefulErr := oc.gracefulClose()
+			if gracefulErr != nil && err == nil {
+				err = gracefulErr
+			}
+		}
+		closeErr := oc.conn.Close()
+		if closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	h.connectionsMu.Unlock()
 
 	// remove hosts from our config from the pool
 	for _, upstream := range h.Upstreams {
 		_, _ = hosts.Delete(upstream.String())
 	}
 
-	return nil
+	return err
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
@@ -441,14 +454,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	// and because we may retry some number of times, carry over the error
 	// from previous tries because of the nuances of load balancing & retries
 	var proxyErr error
-	var retries int
 	for {
 		var done bool
-		done, proxyErr = h.proxyLoopIteration(clonedReq, r, w, proxyErr, start, retries, repl, reqHeader, reqHost, next)
+		done, proxyErr = h.proxyLoopIteration(clonedReq, r, w, proxyErr, start, repl, reqHeader, reqHost, next)
 		if done {
 			break
 		}
-		retries++
 	}
 
 	if proxyErr != nil {
@@ -462,7 +473,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 // that has to be passed in, we brought this into its own method so that we could run defer more easily.
 // It returns true when the loop is done and should break; false otherwise. The error value returned should
 // be assigned to the proxyErr value for the next iteration of the loop (or the error handled after break).
-func (h *Handler) proxyLoopIteration(r *http.Request, origReq *http.Request, w http.ResponseWriter, proxyErr error, start time.Time, retries int,
+func (h *Handler) proxyLoopIteration(r *http.Request, origReq *http.Request, w http.ResponseWriter, proxyErr error, start time.Time,
 	repl *caddy.Replacer, reqHeader http.Header, reqHost string, next caddyhttp.Handler) (bool, error) {
 	// get the updated list of upstreams
 	upstreams := h.Upstreams
@@ -492,7 +503,7 @@ func (h *Handler) proxyLoopIteration(r *http.Request, origReq *http.Request, w h
 		if proxyErr == nil {
 			proxyErr = caddyhttp.Error(http.StatusServiceUnavailable, fmt.Errorf("no upstreams available"))
 		}
-		if !h.LoadBalancing.tryAgain(h.ctx, start, retries, proxyErr, r) {
+		if !h.LoadBalancing.tryAgain(h.ctx, start, proxyErr, r) {
 			return true, proxyErr
 		}
 		return false, proxyErr
@@ -536,7 +547,7 @@ func (h *Handler) proxyLoopIteration(r *http.Request, origReq *http.Request, w h
 	}
 
 	// proxy the request to that upstream
-	proxyErr = h.reverseProxy(w, r, origReq, repl, dialInfo, next)
+	proxyErr = h.customReverseProxy(w, r, origReq, repl, dialInfo, next)
 	if proxyErr == nil || errors.Is(proxyErr, context.Canceled) {
 		// context.Canceled happens when the downstream client
 		// cancels the request, which is not our failure
@@ -555,7 +566,7 @@ func (h *Handler) proxyLoopIteration(r *http.Request, origReq *http.Request, w h
 	h.countFailure(upstream)
 
 	// if we've tried long enough, break
-	if !h.LoadBalancing.tryAgain(h.ctx, start, retries, proxyErr, r) {
+	if !h.LoadBalancing.tryAgain(h.ctx, start, proxyErr, r) {
 		return true, proxyErr
 	}
 
@@ -634,10 +645,10 @@ func (h Handler) prepareRequest(req *http.Request, repl *caddy.Replacer) (*http.
 	}
 
 	// Add the supported X-Forwarded-* headers
-	// err := h.addForwardedHeaders(req)
-	// if err != nil {
-	// 	return nil, err
-	// }
+	err := h.addForwardedHeaders(req)
+	if err != nil {
+		return nil, err
+	}
 
 	return req, nil
 }
@@ -669,8 +680,8 @@ func (h Handler) addForwardedHeaders(req *http.Request) error {
 
 	// Client IP may contain a zone if IPv6, so we need
 	// to pull that out before parsing the IP
-	if before, _, found := strings.Cut(clientIP, "%"); found {
-		clientIP = before
+	if idx := strings.IndexByte(clientIP, '%'); idx >= 0 {
+		clientIP = clientIP[:idx]
 	}
 	ip := net.ParseIP(clientIP)
 	if ip == nil {
@@ -732,7 +743,7 @@ func (h Handler) addForwardedHeaders(req *http.Request) error {
 // reverseProxy performs a round-trip to the given backend and processes the response with the client.
 // (This method is mostly the beginning of what was borrowed from the net/http/httputil package in the
 // Go standard library which was used as the foundation.)
-func (h *Handler) reverseProxy(rw http.ResponseWriter, req *http.Request, origReq *http.Request, repl *caddy.Replacer, di DialInfo, next caddyhttp.Handler) error {
+func (h *Handler) customReverseProxy(rw http.ResponseWriter, req *http.Request, origReq *http.Request, repl *caddy.Replacer, di DialInfo, next caddyhttp.Handler) error {
 	_ = di.Upstream.Host.countRequest(1)
 	//nolint:errcheck
 	defer di.Upstream.Host.countRequest(-1)
@@ -742,34 +753,6 @@ func (h *Handler) reverseProxy(rw http.ResponseWriter, req *http.Request, origRe
 
 	server := req.Context().Value(caddyhttp.ServerCtxKey).(*caddyhttp.Server)
 	shouldLogCredentials := server.Logs != nil && server.Logs.ShouldLogCredentials
-
-	if supports1xx {
-		// Forward 1xx status codes, backported from https://github.com/golang/go/pull/53164
-		trace := &httptrace.ClientTrace{
-			Got1xxResponse: func(code int, header textproto.MIMEHeader) error {
-				h := rw.Header()
-				copyHeader(h, http.Header(header))
-				rw.WriteHeader(code)
-
-				// Clear headers, it's not automatically done by ResponseWriter.WriteHeader() for 1xx responses
-				for k := range h {
-					delete(h, k)
-				}
-
-				return nil
-			},
-		}
-		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	}
-
-	// if FlushInterval is explicitly configured to -1 (i.e. flush continuously to achieve
-	// low-latency streaming), don't let the transport cancel the request if the client
-	// disconnects: user probably wants us to finish sending the data to the upstream
-	// regardless, and we should expect client disconnection in low-latency streaming
-	// scenarios (see issue #4922)
-	if h.FlushInterval == -1 {
-		req = req.WithContext(ignoreClientGoneContext{req.Context(), h.ctx.Done()})
-	}
 
 	// do the round-trip; emit debug log with values we know are
 	// safe, or if there is no error, emit fuller log entry
@@ -985,26 +968,16 @@ func (h Handler) finalizeResponse(
 	return nil
 }
 
-// tryAgain takes the time that the handler was initially invoked,
-// the amount of retries already performed, as well as any error
-// currently obtained, and the request being tried, and returns
-// true if another attempt should be made at proxying the request.
-// If true is returned, it has already blocked long enough before
-// the next retry (i.e. no more sleeping is needed). If false is
-// returned, the handler should stop trying to proxy the request.
-func (lb LoadBalancing) tryAgain(ctx caddy.Context, start time.Time, retries int, proxyErr error, req *http.Request) bool {
-	// no retries are configured
-	if lb.TryDuration == 0 && lb.Retries == 0 {
-		return false
-	}
-
+// tryAgain takes the time that the handler was initially invoked
+// as well as any error currently obtained, and the request being
+// tried, and returns true if another attempt should be made at
+// proxying the request. If true is returned, it has already blocked
+// long enough before the next retry (i.e. no more sleeping is
+// needed). If false is returned, the handler should stop trying to
+// proxy the request.
+func (lb LoadBalancing) tryAgain(ctx caddy.Context, start time.Time, proxyErr error, req *http.Request) bool {
 	// if we've tried long enough, break
-	if lb.TryDuration > 0 && time.Since(start) >= time.Duration(lb.TryDuration) {
-		return false
-	}
-
-	// if we've reached the retry limit, break
-	if lb.Retries > 0 && retries >= lb.Retries {
+	if time.Since(start) >= time.Duration(lb.TryDuration) {
 		return false
 	}
 
@@ -1025,11 +998,6 @@ func (lb LoadBalancing) tryAgain(ctx caddy.Context, start time.Time, retries int
 		if !lb.RetryMatch.AnyMatch(req) {
 			return false
 		}
-	}
-
-	// fast path; if the interval is zero, we don't need to wait
-	if lb.TryInterval == 0 {
-		return true
 	}
 
 	// otherwise, wait and try the next available host
@@ -1246,25 +1214,16 @@ type LoadBalancing struct {
 	// The default policy is random selection.
 	SelectionPolicyRaw json.RawMessage `json:"selection_policy,omitempty" caddy:"namespace=http.custom_reverse_proxy.selection_policies inline_key=policy"`
 
-	// How many times to retry selecting available backends for each
-	// request if the next available host is down. If try_duration is
-	// also configured, then retries may stop early if the duration
-	// is reached. By default, retries are disabled (zero).
-	Retries int `json:"retries,omitempty"`
-
 	// How long to try selecting available backends for each request
-	// if the next available host is down. Clients will wait for up
-	// to this long while the load balancer tries to find an available
-	// upstream host. If retries is also configured, tries may stop
-	// early if the maximum retries is reached. By default, retries
-	// are disabled (zero duration).
+	// if the next available host is down. By default, this retry is
+	// disabled. Clients will wait for up to this long while the load
+	// balancer tries to find an available upstream host.
 	TryDuration caddy.Duration `json:"try_duration,omitempty"`
 
-	// How long to wait between selecting the next host from the pool.
-	// Default is 250ms if try_duration is enabled, otherwise zero. Only
-	// relevant when a request to an upstream host fails. Be aware that
-	// setting this to 0 with a non-zero try_duration can cause the CPU
-	// to spin if all backends are down and latency is very low.
+	// How long to wait between selecting the next host from the pool. Default
+	// is 250ms. Only relevant when a request to an upstream host fails. Be
+	// aware that setting this to 0 with a non-zero try_duration can cause the
+	// CPU to spin if all backends are down and latency is very low.
 	TryInterval caddy.Duration `json:"try_interval,omitempty"`
 
 	// A list of matcher sets that restricts with which requests retries are
@@ -1356,7 +1315,7 @@ func (brc bodyReadCloser) Close() error {
 
 // bufPool is used for buffering requests and responses.
 var bufPool = sync.Pool{
-	New: func() any {
+	New: func() interface{} {
 		return new(bytes.Buffer)
 	},
 }
@@ -1387,19 +1346,6 @@ type handleResponseContext struct {
 	// happen twice.
 	isFinalized bool
 }
-
-// ignoreClientGoneContext is a special context.Context type
-// intended for use when doing a RoundTrip where you don't
-// want a client disconnection to cancel the request during
-// the roundtrip. Set its done field to a Done() channel
-// of a context that doesn't get canceled when the client
-// disconnects, such as caddy.Context.Done() instead.
-type ignoreClientGoneContext struct {
-	context.Context
-	done <-chan struct{}
-}
-
-func (c ignoreClientGoneContext) Done() <-chan struct{} { return c.done }
 
 // proxyHandleResponseContextCtxKey is the context key for the active proxy handler
 // so that handle_response routes can inherit some config options
